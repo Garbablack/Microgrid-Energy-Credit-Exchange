@@ -3,8 +3,12 @@
 (define-constant err-not-found (err u101))
 (define-constant err-insufficient-balance (err u102))
 (define-constant err-invalid-amount (err u103))
+(define-constant err-order-not-found (err u105))
+(define-constant err-invalid-price (err u106))
+(define-constant err-order-exists (err u107))
 
 (define-data-var total-energy-credits uint u0)
+(define-data-var next-order-id uint u1)
 
 (define-map user-credits 
   principal 
@@ -12,6 +16,14 @@
 
 (define-map energy-prices
   uint 
+  uint)
+
+(define-map market-orders
+  uint
+  {seller: principal, amount: uint, price-per-credit: uint, is-active: bool})
+
+(define-map user-sell-orders
+  principal
   uint)
 
 (define-public (initialize-user)
@@ -76,3 +88,76 @@
 
 (define-read-only (get-total-credits)
   (ok (var-get total-energy-credits)))
+
+(define-public (create-sell-order (amount uint) (price-per-credit uint))
+  (let ((user-data (unwrap! (map-get? user-credits tx-sender) err-not-found))
+        (order-id (var-get next-order-id)))
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> price-per-credit u0) err-invalid-price)
+    (asserts! (is-none (map-get? user-sell-orders tx-sender)) err-order-exists)
+    (asserts! (>= (get energy-balance user-data) amount) err-insufficient-balance)
+    (map-set user-credits tx-sender 
+      (merge user-data {
+        energy-balance: (- (get energy-balance user-data) amount)
+      }))
+    (map-set market-orders order-id {
+      seller: tx-sender,
+      amount: amount,
+      price-per-credit: price-per-credit,
+      is-active: true
+    })
+    (map-set user-sell-orders tx-sender order-id)
+    (var-set next-order-id (+ order-id u1))
+    (ok order-id)))
+
+(define-public (buy-from-order (order-id uint) (credits-to-buy uint))
+  (let ((order-data (unwrap! (map-get? market-orders order-id) err-order-not-found))
+        (buyer-data (unwrap! (map-get? user-credits tx-sender) err-not-found))
+        (seller-data (unwrap! (map-get? user-credits (get seller order-data)) err-not-found)))
+    (asserts! (get is-active order-data) err-order-not-found)
+    (asserts! (> credits-to-buy u0) err-invalid-amount)
+    (asserts! (<= credits-to-buy (get amount order-data)) err-invalid-amount)
+    (let ((total-cost (* credits-to-buy (get price-per-credit order-data)))
+          (remaining-amount (- (get amount order-data) credits-to-buy)))
+      (asserts! (>= (get energy-balance buyer-data) total-cost) err-insufficient-balance)
+      (map-set user-credits tx-sender 
+        (merge buyer-data {
+          energy-balance: (+ (- (get energy-balance buyer-data) total-cost) credits-to-buy)
+        }))
+      (map-set user-credits (get seller order-data)
+        (merge seller-data {
+          energy-balance: (+ (get energy-balance seller-data) total-cost)
+        }))
+      (if (is-eq remaining-amount u0)
+        (begin
+          (map-set market-orders order-id 
+            (merge order-data {is-active: false}))
+          (map-delete user-sell-orders (get seller order-data)))
+        (map-set market-orders order-id 
+          (merge order-data {amount: remaining-amount})))
+      (ok true))))
+
+(define-public (cancel-sell-order)
+  (let ((order-id (unwrap! (map-get? user-sell-orders tx-sender) err-order-not-found))
+        (order-data (unwrap! (map-get? market-orders order-id) err-order-not-found))
+        (user-data (unwrap! (map-get? user-credits tx-sender) err-not-found)))
+    (asserts! (get is-active order-data) err-order-not-found)
+    (asserts! (is-eq (get seller order-data) tx-sender) err-owner-only)
+    (map-set user-credits tx-sender 
+      (merge user-data {
+        energy-balance: (+ (get energy-balance user-data) (get amount order-data))
+      }))
+    (map-set market-orders order-id 
+      (merge order-data {is-active: false}))
+    (map-delete user-sell-orders tx-sender)
+    (ok true)))
+
+(define-read-only (get-order-details (order-id uint))
+  (match (map-get? market-orders order-id)
+    order-data (ok order-data)
+    err-order-not-found))
+
+(define-read-only (get-user-sell-order (user principal))
+  (match (map-get? user-sell-orders user)
+    order-id (ok order-id)
+    err-order-not-found))
