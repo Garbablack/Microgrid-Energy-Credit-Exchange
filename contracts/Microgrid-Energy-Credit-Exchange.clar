@@ -6,9 +6,12 @@
 (define-constant err-order-not-found (err u105))
 (define-constant err-invalid-price (err u106))
 (define-constant err-order-exists (err u107))
+(define-constant err-loan-not-found (err u108))
+(define-constant err-loan-active (err u109))
 
 (define-data-var total-energy-credits uint u0)
 (define-data-var next-order-id uint u1)
+(define-data-var next-loan-id uint u1)
 
 (define-map user-credits 
   principal 
@@ -25,6 +28,10 @@
 (define-map user-sell-orders
   principal
   uint)
+
+(define-map active-loans
+  uint
+  {lender: principal, borrower: principal, amount: uint, interest-rate: uint, duration: uint, created-at: uint})
 
 (define-public (initialize-user)
   (let ((user-data {energy-balance: u0, contribution: u0, consumption: u0}))
@@ -180,3 +187,53 @@
       (map-set user-credits tx-sender (merge user-data {energy-balance: (+ (get energy-balance user-data) total-return)}))
       (map-delete staked-credits tx-sender)
       (ok true))))
+
+(define-public (create-loan (borrower principal) (amount uint) (interest-rate uint) (duration uint))
+  (let ((lender-data (unwrap! (map-get? user-credits tx-sender) err-not-found))
+        (borrower-data (unwrap! (map-get? user-credits borrower) err-not-found))
+        (loan-id (var-get next-loan-id)))
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (>= (get energy-balance lender-data) amount) err-insufficient-balance)
+    (map-set user-credits tx-sender
+      (merge lender-data {
+        energy-balance: (- (get energy-balance lender-data) amount)
+      }))
+    (map-set user-credits borrower
+      (merge borrower-data {
+        energy-balance: (+ (get energy-balance borrower-data) amount)
+      }))
+    (map-set active-loans loan-id {
+      lender: tx-sender,
+      borrower: borrower,
+      amount: amount,
+      interest-rate: interest-rate,
+      duration: duration,
+      created-at: stacks-block-height
+    })
+    (var-set next-loan-id (+ loan-id u1))
+    (ok loan-id)))
+
+(define-public (repay-loan (loan-id uint))
+  (let ((loan-data (unwrap! (map-get? active-loans loan-id) err-loan-not-found))
+        (borrower-data (unwrap! (map-get? user-credits tx-sender) err-not-found))
+        (lender-data (unwrap! (map-get? user-credits (get lender loan-data)) err-not-found)))
+    (asserts! (is-eq tx-sender (get borrower loan-data)) err-owner-only)
+    (asserts! (>= (get energy-balance borrower-data) (get amount loan-data)) err-insufficient-balance)
+    (let ((interest (/ (* (get amount loan-data) (get interest-rate loan-data)) u100))
+          (total-repayment (+ (get amount loan-data) interest)))
+      (asserts! (>= (get energy-balance borrower-data) total-repayment) err-insufficient-balance)
+      (map-set user-credits tx-sender
+        (merge borrower-data {
+          energy-balance: (- (get energy-balance borrower-data) total-repayment)
+        }))
+      (map-set user-credits (get lender loan-data)
+        (merge lender-data {
+          energy-balance: (+ (get energy-balance lender-data) total-repayment)
+        }))
+      (map-delete active-loans loan-id)
+      (ok true))))
+
+(define-read-only (get-loan-details (loan-id uint))
+  (match (map-get? active-loans loan-id)
+    loan-data (ok loan-data)
+    err-loan-not-found))
