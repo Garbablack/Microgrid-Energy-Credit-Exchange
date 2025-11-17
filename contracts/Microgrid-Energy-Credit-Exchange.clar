@@ -41,12 +41,21 @@
   (let ((user (unwrap! (map-get? user-credits tx-sender) (err u104)))
         (new-contribution (+ (get contribution user) amount))
         (new-balance (+ (get energy-balance user) amount)))
-    (map-set user-credits tx-sender 
+    (map-set user-credits tx-sender
       (merge user {
         contribution: new-contribution,
         energy-balance: new-balance
       }))
     (var-set total-energy-credits (+ (var-get total-energy-credits) amount))
+    (match (map-get? user-referrer tx-sender)
+      referrer
+      (let ((referrer-data (unwrap! (map-get? user-credits referrer) err-not-found))
+            (bonus (/ (* amount referral-bonus-percent) u100)))
+        (map-set user-credits referrer
+          (merge referrer-data {
+            energy-balance: (+ (get energy-balance referrer-data) bonus)
+          })))
+      true)
     (ok true)))
 
 (define-public (consume-energy (amount uint))
@@ -237,3 +246,13 @@
   (match (map-get? active-loans loan-id)
     loan-data (ok loan-data)
     err-loan-not-found))
+
+(define-constant referral-bonus-percent u10)
+(define-map user-referrer principal principal)
+
+(define-public (set-referrer (referrer principal))
+  (begin
+    (asserts! (not (is-eq tx-sender referrer)) err-invalid-amount)
+    (asserts! (is-some (map-get? user-credits referrer)) err-not-found)
+    (asserts! (is-none (map-get? user-referrer tx-sender)) err-order-exists)
+    (ok (map-set user-referrer tx-sender referrer))))
